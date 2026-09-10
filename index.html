@@ -178,10 +178,20 @@
   }
   .annotate-overlay.show{ display:flex; }
   .annotate-hint{ color:#D7DEE4; font-size:13px; text-align:center; max-width:520px; }
-  .annotate-toolbar{ display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  
+  .annotate-toolbar{ display:flex; gap:8px; flex-wrap:wrap; justify-content:center; align-items:center; }
   .mode-toggle{ display:flex; border:1px solid var(--line-strong); border-radius:6px; overflow:hidden; }
   .mode-toggle button{ padding:9px 16px; background:#fff; color:var(--steel); font-size:13px; font-weight:600; border:none; }
   .mode-toggle button.active{ background:var(--mark); color:#fff; }
+  
+  .tool-options{
+    display:flex; align-items:center; gap:12px; background:#fff; padding:6px 12px; 
+    border-radius:6px; border:1px solid var(--line-strong); height:36px;
+  }
+  .tool-options label{ display:flex; align-items:center; gap:6px; font-size:12px; font-weight:650; color:var(--steel); cursor:pointer; margin:0;}
+  .tool-options input[type="color"]{ width:22px; height:22px; padding:0; border:none; cursor:pointer; background:none; border-radius:3px; }
+  .tool-options input[type="range"]{ width:70px; cursor:pointer; margin:0; }
+
   #annotateCanvas{
     touch-action:none; max-width:92vw; max-height:60vh; width:auto; height:auto;
     background:#000; border-radius:4px; cursor:crosshair; display:block;
@@ -269,15 +279,28 @@
 </div>
 
 <div class="annotate-overlay" id="annotateOverlay">
-  <p class="annotate-hint" id="annotateHint">Mode Kotak: tarik jari/mouse untuk menggambar kotak merah. Mode Teks: klik satu titik lalu isi labelnya.</p>
+  <p class="annotate-hint" id="annotateHint">Mode Kotak: tarik untuk menggambar. Mode Teks: klik titik lalu isi labelnya.</p>
   <canvas id="annotateCanvas"></canvas>
   <div class="annotate-toolbar">
     <div class="mode-toggle">
-      <button id="btnModeBox" class="active">⬛ Kotak merah</button>
-      <button id="btnModeText">🔤 Label teks</button>
+      <button id="btnModeBox" class="active">⬛ Kotak</button>
+      <button id="btnModeText">🔤 Teks</button>
     </div>
-    <button class="btn btn-ghost btn-sm" id="btnAnnotateUndo">↺ Undo terakhir</button>
-    <button class="btn btn-ghost btn-sm" id="btnAnnotateClear">Hapus semua tanda</button>
+    
+    <div class="tool-options">
+      <label title="Warna Objek">
+        Warna: <input type="color" id="markColor" value="#FF3B30">
+      </label>
+      <label id="sizeWrap" title="Ubah ukuran objek/teks">
+        Ukuran: <input type="range" id="markSize" min="10" max="100" value="25">
+      </label>
+      <label id="angleWrap" title="Atur sudut kemiringan (khusus kotak)">
+        Sudut: <input type="range" id="markAngle" min="0" max="360" value="0">
+      </label>
+    </div>
+
+    <button class="btn btn-ghost btn-sm" id="btnAnnotateUndo">↺ Undo</button>
+    <button class="btn btn-ghost btn-sm" id="btnAnnotateClear">Hapus Semua</button>
     <button class="btn btn-ghost" id="btnAnnotateCancel">Batal</button>
     <button class="btn btn-primary" id="btnAnnotateDone">Selesai</button>
   </div>
@@ -286,8 +309,6 @@
 <div class="status" id="statusBar"></div>
 
 <script>
-// ---------- POLYFILL PENYIMPANAN STANDAR BROWSER (INDEXEDDB) ----------
-// Menggantikan window.storage khusus agar jalan normal di semua browser
 if (typeof window.storage === 'undefined') {
   window.storage = (function() {
     const DB_NAME = 'WI_Photo_DB';
@@ -332,14 +353,14 @@ if (typeof window.storage === 'undefined') {
 
 (function(){
   const STORAGE_INDEX_KEY = 'wi-photo-index';
-  const MAX_STORED_CHARS = 4.5 * 1024 * 1024; // buffer under 5MB per-key cap
+  const MAX_STORED_CHARS = 4.5 * 1024 * 1024;
   const MASTER_MAX_DIM = 2400;
   const fullKey = id => 'wi-photo-full:' + id;
 
   let photoIndex = [];
   let currentFilter = 'all';
   let selectedFile = null;
-  let annotatedMasterCanvas = null; // set when user annotates a pending new photo
+  let annotatedMasterCanvas = null; 
 
   const el = id => document.getElementById(id);
   const filterSelect = el('filterSelect');
@@ -365,6 +386,10 @@ if (typeof window.storage === 'undefined') {
   const btnAnnotateDone = el('btnAnnotateDone');
   const btnModeBox = el('btnModeBox');
   const btnModeText = el('btnModeText');
+  const markColor = el('markColor');
+  const markSize = el('markSize');
+  const markAngle = el('markAngle');
+  const angleWrap = el('angleWrap');
 
   function showStatus(msg, type){
     statusBar.textContent = msg;
@@ -373,7 +398,6 @@ if (typeof window.storage === 'undefined') {
     showStatus._t = setTimeout(() => { statusBar.classList.remove('show'); }, 3200);
   }
 
-  // ---------- storage helpers ----------
   async function loadIndex(){
     try{
       const res = await window.storage.get(STORAGE_INDEX_KEY, false);
@@ -386,7 +410,6 @@ if (typeof window.storage === 'undefined') {
     await window.storage.set(STORAGE_INDEX_KEY, JSON.stringify(photoIndex), false);
   }
 
-  // ---------- image helpers ----------
   function loadImageFromFile(file){
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -471,9 +494,9 @@ if (typeof window.storage === 'undefined') {
     setTimeout(() => URL.revokeObjectURL(url), 3000);
   }
 
-  // ---------- annotator (kotak merah + label teks) ----------
+  // ---------- annotator ----------
   let annotatorBaseCanvas = null;
-  let annotatorMarks = []; // { type:'box', x,y,w,h } or { type:'text', x,y, text }
+  let annotatorMarks = []; // { type, x, y, w, h, text, color, size, angle }
   let annotatorDragStart = null;
   let annotatorOnConfirm = null;
   let annotatorMode = 'box'; // 'box' | 'text'
@@ -495,37 +518,67 @@ if (typeof window.storage === 'undefined') {
   }
 
   function drawBox(ctx, b, canvasWidth){
+    ctx.save();
+    // Rotasi & Ukuran Kotak
+    const cx = b.x + b.w / 2;
+    const cy = b.y + b.h / 2;
+    ctx.translate(cx, cy);
+    if (b.angle) {
+      ctx.rotate((b.angle * Math.PI) / 180);
+    }
+    
+    // Faktor scaling ukuran tambahan
+    const scaleFactor = (b.size || 25) / 25;
+    ctx.scale(scaleFactor, scaleFactor);
+
+    const hw = b.w / 2;
+    const hh = b.h / 2;
     const lw = Math.max(4, Math.round(canvasWidth / 220));
+
     ctx.lineWidth = lw + 3;
     ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.strokeRect(-hw, -hh, b.w, b.h);
+
     ctx.lineWidth = lw;
-    ctx.strokeStyle = '#FF3B30';
-    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = b.color || '#FF3B30';
+    ctx.strokeRect(-hw, -hh, b.w, b.h);
+
+    ctx.restore();
   }
 
   function drawTextMark(ctx, m, canvasWidth, canvasHeight){
-    const fontSize = Math.max(20, Math.round(canvasWidth / 32));
-    ctx.font = `bold ${fontSize}px -apple-system, "Segoe UI", Roboto, Arial, sans-serif`;
+    ctx.save();
+    const sVal = m.size || 25;
+    const fontSize = Math.max(14, Math.round(canvasWidth * (sVal / 1000)));
+    
+    ctx.font = `bold ${fontSize}px Arial`;
     ctx.textBaseline = 'top';
+    
     const padX = Math.round(fontSize * 0.5);
     const padY = Math.round(fontSize * 0.32);
     const textW = ctx.measureText(m.text).width;
     const boxW = textW + padX * 2;
     const boxH = fontSize + padY * 2;
+    
     let bx = m.x, by = m.y;
     if (bx + boxW > canvasWidth) bx = canvasWidth - boxW - 4;
     if (bx < 4) bx = 4;
     if (by + boxH > canvasHeight) by = canvasHeight - boxH - 4;
     if (by < 4) by = 4;
+    
+    const themeColor = m.color || '#FF3B30';
+
     roundRectPath(ctx, bx - 3, by - 3, boxW + 6, boxH + 6, 6);
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
     ctx.fill();
+    
     roundRectPath(ctx, bx, by, boxW, boxH, 5);
-    ctx.fillStyle = '#FF3B30';
+    ctx.fillStyle = themeColor;
     ctx.fill();
+    
     ctx.fillStyle = '#FFFFFF';
     ctx.fillText(m.text, bx + padX, by + padY);
+    ctx.restore();
   }
 
   function drawMark(ctx, m, canvasWidth, canvasHeight){
@@ -541,8 +594,17 @@ if (typeof window.storage === 'undefined') {
     all.forEach(m => drawMark(ctx, m, annotateCanvas.width, annotateCanvas.height));
   }
 
-  function normalizeBox(p1, p2){
-    return { type: 'box', x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y), w: Math.abs(p2.x - p1.x), h: Math.abs(p2.y - p1.y) };
+  function normalizeBox(p1, p2, color, size, angle){
+    return { 
+      type: 'box', 
+      x: Math.min(p1.x, p2.x), 
+      y: Math.min(p1.y, p2.y), 
+      w: Math.abs(p2.x - p1.x), 
+      h: Math.abs(p2.y - p1.y), 
+      color, 
+      size, 
+      angle 
+    };
   }
 
   function canvasPointFromEvent(e){
@@ -555,6 +617,8 @@ if (typeof window.storage === 'undefined') {
   function updateModeButtons(){
     btnModeBox.classList.toggle('active', annotatorMode === 'box');
     btnModeText.classList.toggle('active', annotatorMode === 'text');
+    // Munculkan slider sudut (angle) hanya pas mode Kotak
+    angleWrap.style.display = annotatorMode === 'box' ? 'flex' : 'none';
   }
   btnModeBox.addEventListener('click', () => { annotatorMode = 'box'; updateModeButtons(); });
   btnModeText.addEventListener('click', () => { annotatorMode = 'text'; updateModeButtons(); });
@@ -589,23 +653,29 @@ if (typeof window.storage === 'undefined') {
   annotateCanvas.addEventListener('pointermove', (e) => {
     if (!annotatorDragStart || annotatorMode !== 'box') return;
     const cur = canvasPointFromEvent(e);
-    redrawAnnotator(normalizeBox(annotatorDragStart, cur));
+    const activeColor = markColor.value;
+    const activeSize = parseInt(markSize.value, 10);
+    const activeAngle = parseInt(markAngle.value, 10);
+    redrawAnnotator(normalizeBox(annotatorDragStart, cur, activeColor, activeSize, activeAngle));
   });
   
   annotateCanvas.addEventListener('pointerup', (e) => {
     if (!annotatorDragStart) return;
     const cur = canvasPointFromEvent(e);
+    const activeColor = markColor.value;
+    const activeSize = parseInt(markSize.value, 10);
+    const activeAngle = parseInt(markAngle.value, 10);
+    
     if (annotatorMode === 'box'){
-      const box = normalizeBox(annotatorDragStart, cur);
+      const box = normalizeBox(annotatorDragStart, cur, activeColor, activeSize, activeAngle);
       if (box.w > 10 && box.h > 10) annotatorMarks.push(box);
     } else {
       const dx = cur.x - annotatorDragStart.x, dy = cur.y - annotatorDragStart.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      // Sensitivitas jarak ditingkatkan jadi 20 biar gampang nge-klik di HP (nggak ke-detect cancel kalau geser dikit)
       if (dist < 20){
         const text = prompt('Isi teks label (mis. nama alat/valve):', '');
         if (text && text.trim()){
-          annotatorMarks.push({ type: 'text', x: annotatorDragStart.x, y: annotatorDragStart.y, text: text.trim() });
+          annotatorMarks.push({ type: 'text', x: annotatorDragStart.x, y: annotatorDragStart.y, text: text.trim(), color: activeColor, size: activeSize, angle: 0 });
         }
       }
     }
@@ -676,7 +746,6 @@ if (typeof window.storage === 'undefined') {
     }
   }
 
-  // ---------- form ----------
   fileInput.addEventListener('change', () => {
     const f = fileInput.files[0];
     if (!f) return;
@@ -755,10 +824,9 @@ if (typeof window.storage === 'undefined') {
     }
   });
 
-  // ---------- delete / edit ----------
   async function handleDelete(id){
     if (!confirm('Hapus foto ini? Tindakan tidak bisa dibatalkan.')) return;
-    try{ await window.storage.delete(fullKey(id), false); }catch(e){ /* mungkin sudah tidak ada */ }
+    try{ await window.storage.delete(fullKey(id), false); }catch(e){}
     photoIndex = photoIndex.filter(p => p.id !== id);
     await saveIndex();
     renderAll();
@@ -804,7 +872,6 @@ if (typeof window.storage === 'undefined') {
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
-  // ---------- view / download ----------
   async function openViewer(id){
     modalOverlay.classList.add('show');
     modalBody.innerHTML = '<span class="modal-loading">Memuat foto...</span>';
@@ -887,7 +954,6 @@ if (typeof window.storage === 'undefined') {
     }
   });
 
-  // ---------- rendering ----------
   function getFilteredList(){
     return currentFilter === 'all' ? photoIndex.slice() : photoIndex.filter(p => p.wiNumber === currentFilter);
   }
@@ -976,7 +1042,6 @@ if (typeof window.storage === 'undefined') {
     renderGallery();
   }
 
-  // ---------- init ----------
   (async function init(){
     galleryContainer.innerHTML = '<div class="empty-state">Memuat data...</div>';
     await loadIndex();
